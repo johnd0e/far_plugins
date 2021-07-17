@@ -5,11 +5,11 @@
 
 local F = far.Flags
 local min, max, floor, ceil = math.min, math.max, math.floor, math.ceil
-local band, bor, bxor, bnot = bit64.band, bit64.bor, bit64.bxor, bit64.bnot
+local band, bor = bit64.band, bit64.bor
 
 -- Some color indexes; taken from far.Colors;
 local COL_MENUTEXT, COL_MENUSELECTEDTEXT, COL_MENUHIGHLIGHT,
-  COL_MENUSELECTEDHIGHLIGHT, COL_MENUBOX, COL_MENUTITLE = 0,1,2,3,4,5
+  COL_MENUSELECTEDHIGHLIGHT = 0,1,2,3
 
 local function GetColor (index)
   return far.AdvControl("ACTL_GETCOLOR", index)
@@ -109,6 +109,7 @@ local function NewList (props, items, bkeys, startId)
   SetParam(self, P, "keys_showitem",          "F7")
   SetParam(self, P, "keys_xlatonoff",         "F8")
   SetParam(self, P, "keys_clearpattern",      {"Del","NumDel"})
+  SetParam(self, P, "keys_insertpattern",     {"CtrlV","RCtrlV","ShiftIns","ShiftNum0"})
   SetParam(self, P, "keys_checkitem",         {"Ins","Num0"})
   SetParam(self, P, "keys_copyitem",          {"CtrlC","CtrlIns","CtrlNum0","RCtrlC","RCtrlIns","RCtrlNum0"})
   SetParam(self, P, "keys_deleteitem",        {"ShiftDel","ShiftNumDel"})
@@ -200,7 +201,7 @@ function List:OnDialogClose ()
 end
 
 do
-  local ch = unicode.utf8.char
+  local ch = ("").char
   local sng = {c1=9484,c2=9488,c3=9492,c4=9496,hor=9472,ver=9474,sep1=9500,sep2=9508}
   local dbl = {c1=9556,c2=9559,c3=9562,c4=9565,hor=9552,ver=9553,sep1=9567,sep2=9570}
   for k,v in pairs(sng) do
@@ -243,8 +244,8 @@ do
       elseif k == 1 then c = up
       elseif k == self.h then c = dn
       else
-        local k = k-2
-        c = k >= self.slider_start and k < self.slider_start+self.slider_len and scr2 or scr1
+        local m = k-2
+        c = m >= self.slider_start and m < self.slider_start+self.slider_len and scr2 or scr1
       end
       far.Text(x+self.w+1, y+k, color, c)
     end
@@ -256,7 +257,7 @@ function List:Draw (x, y)
   self:DrawBox(x, y)
   x, y = x+1, y+1-self.upper
   local mlen = self.margin:len()
-  local char = unicode.utf8.char
+  local char = ("").char
   local check, hor = char(8730), char(9472)
   for i=self.upper, self.upper+self.h-1 do
     local v = self.drawitems[i]
@@ -472,11 +473,20 @@ local function ProcessSearchMethod (method, pattern)
     pattern = pattern:gsub(sNeedEscape, "\\%1")
   elseif method == "lua" then
     local map = { l="%a", u="%a", L="%A", U="%A" }
-    return function(s, p, init)
-      p = p:gsub("(%%?)(.)", function(a,b) return a=="" and b:lower() or map[b] end)
-      local ok, fr, to = pcall(("").find, s:lower(), p, #(s:sub(1, init-1)) + 1)
-      if not (ok and fr) then return nil end
-      return string.sub(s,1,fr-1):len()+1, string.sub(s,1,to):len()
+    if ("").charpattern then -- luautf8 library (since 30-Aug-2019)
+      return function(s, p, init)
+        p = p:gsub("(%%?)(.)", function(a,b) return a=="" and b:lower() or map[b] end)
+        local ok, fr, to = pcall(("").find, s:lower(), p, init)
+        if ok then return fr, to end
+        return fr, to
+      end
+    else -- Selene Unicode library (prior to 30-Aug-2019)
+      return function(s, p, init)
+        p = p:gsub("(%%?)(.)", function(a,b) return a=="" and b:lower() or map[b] end)
+        local ok, fr, to = pcall(("").find, s:lower(), p, #(s:sub(1, init-1)) + 1)
+        if not (ok and fr) then return nil end
+        return string.sub(s,1,fr-1):len()+1, string.sub(s,1,to):len()
+      end
     end
   elseif method ~= "regex" then
     error("invalid search method")
@@ -526,7 +536,7 @@ function List:ChangePattern (hDlg, pattern)
   end
 
   if find or find2 then
-    for i,v in ipairs(self.items) do
+    for _,v in ipairs(self.items) do
       local fr, to
       if find then
         fr, to = find(v.text, pattern, self.searchstart)
@@ -556,7 +566,7 @@ end
 
 function List:PrepareToDisplay (hDlg)
   self.drawitems = {}
-  for i,v in ipairs(self.items) do
+  for _,v in ipairs(self.items) do
     local vdata = self.idata[v]
     vdata.fr, vdata.to = v.fr, v.to
     self.drawitems[#self.drawitems+1] = v
@@ -740,6 +750,44 @@ function List:DeleteFilteredItems (hDlg, bConfirm)
   end
 end
 
+-- Delete some items from the currently displayed items
+function List:DeleteNonexistentItems (hDlg, fExist, fConfirm)
+  if self.drawitems[1] then
+    local n = 0
+    local items, idata = self.items, self.idata
+    -- mark nonexistent items
+    for _,v in ipairs(self.drawitems) do
+      if not fExist(v) then
+        idata[v].marked = true
+        n = n + 1
+      end
+    end
+    if n > 0 then
+      if not fConfirm or fConfirm(n) then
+        for k,v in pairs(idata) do
+          if v.marked then
+            items[v.index] = false
+            idata[k] = nil
+          end
+        end
+        local shift = 0
+        for i,v in ipairs(items) do
+          if v == false then
+            shift = shift + 1
+          elseif shift > 0 then
+            items[i-shift] = v
+            idata[v].index = i-shift
+          end
+        end
+        for i=#items,#items-shift+1,-1 do items[i] = nil end
+        self:ChangePattern(hDlg, self.pattern)
+      else
+        for _,v in pairs(idata) do v.marked = nil end
+      end
+    end
+  end
+end
+
 function List:CopyItemToClipboard()
   local Item = self.drawitems[self.sel]
   if Item then far.CopyToClipboard(Item.text:sub(self.searchstart)) end
@@ -813,6 +861,10 @@ function List:Key (hDlg, key)
 
     if FindKey(self.keys_clearpattern, key) and self.pattern ~= "" then
       self:ChangePattern(hDlg, "")
+
+    elseif FindKey(self.keys_insertpattern, key) then
+      local str = far.PasteFromClipboard()
+      self:ChangePattern(hDlg, str and str:match("^[^\r\n]*") or "")
 
     elseif key == "BS" and self.pattern ~= "" then
       self:ChangePattern(hDlg, self.pattern:sub(1,-2))

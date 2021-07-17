@@ -1,7 +1,7 @@
 -- utils.lua --
 
 local F = far.Flags
-local band, bor, bnot = bit64.band, bit64.bor, bit64.bnot
+local band, bor = bit64.band, bit64.bor
 local PluginDir = far.PluginStartupInfo().ModuleDir
 
 local function OnError (msg)
@@ -97,8 +97,8 @@ end
 local function RunInternalScript (name, ...)
   local f = LoadEmbeddedScript(name)
   if f then return f(...) end
-  local f, errmsg = loadfile(PluginDir..name..".lua")
-  if f then return f(...) end
+  local f2, errmsg = loadfile(PluginDir..name..".lua")
+  if f2 then return f2(...) end
   error(errmsg)
 end
 
@@ -127,23 +127,33 @@ end
 local function RunUserItem (aItem, aProperties, ...)
   assert(aItem.filename, "no file name")
   assert(aItem.env, "no environment")
-  -- find and compile the file
-  local chunk = LoadName(aItem.filename)
-  -- copy "fixed" and append "variable" arguments
-  local args = {}
-  for k,v in pairs(aProperties) do args[k] = v end
-  for i,v in ipairs(aItem.arg)  do args[i] = v end
-  local n, n2 = #args, select("#", ...)
-  args.n = n + n2
-  for i=1,n2 do args[n+i] = select(i, ...) end
-  -- run the chunk
-  setfenv(chunk, aItem.env)
-  return chunk(args)
+
+  -- Get the chunk. If it is not given directly then find and compile the file.
+  local chunk = type(aItem.filename)=="function" and aItem.filename or LoadName(aItem.filename)
+
+  -- Set environment. Use pcall since if chunk is not a Lua function an error is thrown.
+  pcall(setfenv, chunk, aItem.env)
+
+  -- Copy "fixed" and append "variable" arguments, then run the chunk.
+  if aItem.unpack then
+    local args = { unpack(aItem.arg, 1, aItem.arg.n) }
+    local n2 = select("#", ...)
+    for k=1,n2 do args[aItem.arg.n + k] = select(k, ...); end
+    return chunk(unpack(args, 1, aItem.arg.n + n2))
+  else
+    local args = {}
+    for k,v in pairs(aProperties) do args[k] = v end
+    for i,v in ipairs(aItem.arg)  do args[i] = v end
+    local n, n2 = #args, select("#", ...)
+    args.n = n + n2
+    for i=1,n2 do args[n+i] = select(i, ...) end
+    return chunk(args)
+  end
 end
 
 local function ConvertUserHotkey(str)
   local d = 0
-  for elem in str:upper():gmatch("[^+-]+") do
+  for elem in str:upper():gmatch("[^+%-]+") do
     if elem == "ALT" then d = bor(d, 0x01)
     elseif elem == "CTRL" then d = bor(d, 0x02)
     elseif elem == "SHIFT" then d = bor(d, 0x04)
@@ -153,14 +163,14 @@ local function ConvertUserHotkey(str)
   return d
 end
 
-local function MakeAddToMenu (Items, Env, HotKeyTable)
+local function MakeAddToMenu (Items, Env, HotKeyTable, Unpack)
   local function AddToMenu (aWhere, aItemText, aHotKey, aFileName, ...)
     if type(aWhere) ~= "string" then return end
     aWhere = aWhere:lower()
     if not aWhere:find("[evpdc]") then return end
     ---------------------------------------------------------------------------
     local SepText = type(aItemText)=="string" and aItemText:match("^:sep:(.*)")
-    local bUserItem = SepText or type(aFileName)=="string"
+    local bUserItem = SepText or type(aFileName)=="string" or type(aFileName)=="function"
     if not bUserItem then
       if aItemText~=true or type(aFileName)~="number" then
         return
@@ -172,7 +182,8 @@ local function MakeAddToMenu (Items, Env, HotKeyTable)
       if HotKeyTable[key] then
         far.Message(("Key `%s' is already allocated"):format(aHotKey),"AddToMenu",nil,"w")
       elseif bUserItem then
-        HotKeyTable[key] = {filename=aFileName, env=Env, arg={...}}
+        local n = select("#", ...)
+        HotKeyTable[key] = {filename=aFileName, env=Env, arg={n=n, ...}, unpack=Unpack}
       else
         HotKeyTable[key] = aFileName -- menu position of a built-in utility
       end
@@ -183,7 +194,8 @@ local function MakeAddToMenu (Items, Env, HotKeyTable)
       if SepText then
         item = { text=SepText, separator=true }
       else
-        item = { text=tostring(aItemText), filename=aFileName, env=Env, arg={...} }
+        local n = select("#", ...)
+        item = { text=tostring(aItemText), filename=aFileName, env=Env, arg={n=n, ...}, unpack=Unpack }
       end
       if aWhere:find"c" then table.insert(Items.config, item) end
       if aWhere:find"d" then table.insert(Items.dialog, item) end
@@ -195,10 +207,12 @@ local function MakeAddToMenu (Items, Env, HotKeyTable)
   return AddToMenu
 end
 
-local function MakeAddCommand (CommandTable, Env)
+local function MakeAddCommand (CommandTable, Env, Unpack)
   return function (aCommand, aFileName, ...)
-    if type(aCommand)=="string" and type(aFileName)=="string" then
-      CommandTable[aCommand] = { filename=aFileName, env=Env, arg={...} }
+    local fntype = type(aFileName)
+    if type(aCommand)=="string" and (fntype=="string" or fntype=="function") then
+      local n = select("#", ...)
+      CommandTable[aCommand] = { filename=aFileName, env=Env, arg={n=n, ...}, unpack=Unpack }
     end
   end
 end
@@ -279,8 +293,10 @@ local function LoadUserMenu (aFileName)
     end
     local chunk = assert(loadfile(filename))
     uStack[uDepth] = setmetatable({}, uMeta)
-    env.AddToMenu = MakeAddToMenu(userItems, uStack[uDepth], hotKeyTable)
-    env.AddCommand = MakeAddCommand(commandTable, uStack[uDepth])
+    env.AddToMenu    = MakeAddToMenu(userItems, uStack[uDepth], hotKeyTable, false)
+    env.AddToMenuEx  = MakeAddToMenu(userItems, uStack[uDepth], hotKeyTable, true)
+    env.AddCommand   = MakeAddCommand(commandTable, uStack[uDepth], false)
+    env.AddCommandEx = MakeAddCommand(commandTable, uStack[uDepth], true)
     setfenv(chunk, env)()
     uDepth = uDepth - 1
   end
@@ -400,7 +416,7 @@ end
 local function ExecuteCommandLine (tActions, tCommands, sFrom, fConfig)
   local function wrapfunc()
     local env = setmetatable({}, {__index=_G})
-    for i,v in ipairs(tActions) do
+    for _,v in ipairs(tActions) do
       if v.command then
         local fileobject = tCommands[v.command]
         RunUserItem(fileobject, {From=sFrom}, unpack(v))
@@ -488,14 +504,17 @@ end
 -- same as find, but offsets are in characters rather than bytes
 -- DON'T REMOVE: it's documented in LF4Ed manual and must be available to user scripts.
 local function AddCfindFunction()
-  local usub, ssub = unicode.utf8.sub, string.sub
-  local ulen, slen = unicode.utf8.len, string.len
-  local ufind = unicode.utf8.find
-  unicode.utf8.cfind = function(s, patt, init, plain)
-    init = init and slen(usub(s, 1, init-1)) + 1
-    local t = { ufind(s, patt, init, plain) }
-    if t[1] == nil then return nil end
-    return ulen(ssub(s, 1, t[1]-1)) + 1, ulen(ssub(s, 1, t[2])), unpack(t, 3)
+  local ulib = getmetatable("").__index
+  if type(ulib) == "table" then
+    local usub, ssub = ulib.sub, string.sub
+    local ulen, slen = ulib.len, string.len
+    local ufind = ulib.find
+    ulib.cfind = function(s, patt, init, plain)
+      init = init and slen(usub(s, 1, init-1)) + 1
+      local t = { ufind(s, patt, init, plain) }
+      if t[1] == nil then return nil end
+      return ulen(ssub(s, 1, t[1]-1)) + 1, ulen(ssub(s, 1, t[2])), unpack(t, 3)
+    end
   end
 end
 
